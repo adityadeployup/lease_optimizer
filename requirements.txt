@@ -1,0 +1,3 @@
+# requirements.txt
+pulp==2.8.0  # Or the specific version you tested with
+streamlit==1.36.0 # Or the specific version you tested with
