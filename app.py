@@ -312,34 +312,49 @@ def create_sample_properties_csv_content() -> str:
 
 # --- Refactored Display Functions for Streamlit ---
 
-def display_optimizer_configuration_st(optimizer: LeaseOptimizerMILP):
-    """Prints the configuration settings of the optimizer using Streamlit."""
-    st.subheader("Optimizer Configuration")
-    st.write(f"  Budget Tolerance (Upper): {optimizer.budget_tolerance * 100:.0f}%")
-    st.write(f"  Units Tolerance: {optimizer.unit_tolerance * 100:.0f}%")
-    st.write(f"  Min Properties per Group: {optimizer.min_properties_per_group}")
-    st.write(f"  Occupancy Penalty per Unit per Day: ₹{optimizer.occupancy_penalty_per_unit_per_day:.2f} (for ratings > {optimizer.occupancy_rating_threshold})")
-    st.write(f"  Solver Time Limit (per plan): {optimizer.solver_time_limit_seconds} seconds")
-    st.write(f"  Solver MIP Gap Tolerance (per plan): {optimizer.solver_mip_gap*100:.1f}%")
-    if optimizer.pre_selected_property_ids:
-        st.write(f"  Explicitly Pre-Selected Properties: {', '.join(optimizer.pre_selected_property_ids)}")
-    else:
-        st.write("  No properties were explicitly pre-selected.")
-    
-    st.write(f"Client Request: Units: {optimizer.units_required}, Minimum Cost Target: ₹{optimizer.budget:,.0f} for {optimizer.days} days.")
+def display_optimizer_configuration_content_st(optimizer: LeaseOptimizerMILP):
+    """Prints the configuration settings of the optimizer using Streamlit, formatted as a card."""
+    st.markdown("### ⚙️ Optimizer Configuration")
 
-def print_plan_details_st(plan_idx: int, lease_plan: List[LeasePlan], all_properties_data: List[Property], optimizer: LeaseOptimizerMILP):
-    """Prints details for a single optimized lease plan using Streamlit."""
-    st.markdown(f"### 🏷️ Optimized Plan {plan_idx}")
+    # Client Request
+    st.markdown("#### Client Request")
+    st.info(f"**Target Units:** {optimizer.units_required}  \n"
+            f"**Minimum Cost Target:** ₹{optimizer.budget:,.0f}  \n"
+            f"**Lease Duration:** {optimizer.days} days ({optimizer.start_date.strftime('%b %d, %Y')} to {optimizer.end_date.strftime('%b %d, %Y')})")
     
+    st.markdown("#### Constraints & Penalties")
+    col_c1, col_c2 = st.columns(2)
+    with col_c1:
+        st.write(f"**Budget Upper Tolerance:** {optimizer.budget_tolerance * 100:.0f}%")
+        st.write(f"**Units Tolerance:** {optimizer.unit_tolerance * 100:.0f}%")
+        st.write(f"**Min Properties per Group:** {optimizer.min_properties_per_group}")
+    with col_c2:
+        st.write(f"**Partial Lease Penalty:** ₹{optimizer.full_property_penalty_per_unit:.2f} / unit")
+        st.write(f"**High Occupancy Penalty:** ₹{optimizer.occupancy_penalty_per_unit_per_day:.2f} / unit / day")
+        st.write(f"**Occupancy Threshold (for penalty):** > {optimizer.occupancy_rating_threshold}")
+
+    st.markdown("#### Solver Settings")
+    col_s1, col_s2 = st.columns(2)
+    with col_s1:
+        st.write(f"**Time Limit (per plan):** {optimizer.solver_time_limit_seconds} seconds")
+    with col_s2:
+        st.write(f"**MIP Gap Tolerance (per plan):** {optimizer.solver_mip_gap*100:.1f}%")
+
+    if optimizer.pre_selected_property_ids:
+        st.markdown("#### Pre-selected Properties")
+        st.caption(f"**Explicitly Included:** {', '.join(optimizer.pre_selected_property_ids)}")
+    else:
+        st.caption("No properties were explicitly pre-selected.")
+
+
+def calculate_plan_metrics(lease_plan: List[LeasePlan], all_properties_data: List[Property], optimizer: LeaseOptimizerMILP):
+    """Calculates key metrics for a given lease plan."""
     total_plan_actual_cost = 0
     total_plan_units = 0
     total_penalty_for_partial_leases = 0
     total_penalty_for_high_occupancy = 0
     selected_groups: Dict[str, int] = {}
     total_properties_selected_in_plan = 0
-
-    property_details_for_display = []
 
     for lease in lease_plan:
         prop_obj_orig = next((p for p in all_properties_data if p.property_id == lease.property_id), None)
@@ -357,7 +372,55 @@ def print_plan_details_st(plan_idx: int, lease_plan: List[LeasePlan], all_proper
                 total_penalty_for_high_occupancy += lease.units * optimizer.occupancy_penalty_per_unit_per_day * optimizer.days
 
             selected_groups[prop_obj_orig.group] = selected_groups.get(prop_obj_orig.group, 0) + 1
+        
+    total_objective_value = total_plan_actual_cost + total_penalty_for_partial_leases + total_penalty_for_high_occupancy
 
+    min_budget_allowed = optimizer.budget
+    max_budget_allowed = optimizer.budget * (1 + optimizer.budget_tolerance)
+    budget_status = (min_budget_allowed <= total_plan_actual_cost <= max_budget_allowed)
+
+    min_units_allowed = optimizer.units_required * (1 - optimizer.unit_tolerance)
+    max_units_allowed = optimizer.units_required * (1 + optimizer.unit_tolerance)
+    units_status = (min_units_allowed <= total_plan_units <= max_units_allowed)
+
+    group_constraint_met_overall = True
+    if optimizer.min_properties_per_group > 0:
+        for group_char in optimizer.active_groups:
+            count = selected_groups.get(group_char, 0)
+            if count < optimizer.min_properties_per_group:
+                group_constraint_met_overall = False
+                break
+
+    return {
+        "total_plan_actual_cost": total_plan_actual_cost,
+        "total_plan_units": total_plan_units,
+        "total_penalty_for_partial_leases": total_penalty_for_partial_leases,
+        "total_penalty_for_high_occupancy": total_penalty_for_high_occupancy,
+        "total_objective_value": total_objective_value,
+        "total_properties_selected": total_properties_selected_in_plan,
+        "budget_status": budget_status,
+        "units_status": units_status,
+        "group_constraint_met_overall": group_constraint_met_overall,
+        "selected_groups": selected_groups,
+        "min_budget_allowed": min_budget_allowed,
+        "max_budget_allowed": max_budget_allowed,
+        "min_units_allowed": min_units_allowed,
+        "max_units_allowed": max_units_allowed,
+    }
+
+
+def print_plan_details_st(plan_idx: int, lease_plan: List[LeasePlan], all_properties_data: List[Property], optimizer: LeaseOptimizerMILP):
+    """Prints detailed information for a single optimized lease plan within an expander."""
+    
+    metrics = calculate_plan_metrics(lease_plan, all_properties_data, optimizer)
+
+    st.markdown(f"#### Properties in Plan {plan_idx}")
+    
+    property_details_for_display = []
+    for lease in lease_plan:
+        prop_obj_orig = next((p for p in all_properties_data if p.property_id == lease.property_id), None)
+        if prop_obj_orig:
+            current_rental_for_units = lease.units * lease.rate_per_day * optimizer.days
             pre_selected_indicator = "(PRE-SELECTED)" if lease.pre_selected else ""
             property_details_for_display.append({
                 "Property ID": lease.property_id,
@@ -369,47 +432,34 @@ def print_plan_details_st(plan_idx: int, lease_plan: List[LeasePlan], all_proper
                 "Cost for Property": f"₹{int(current_rental_for_units):,}",
                 "Status": pre_selected_indicator
             })
-        else:
-            st.warning(f"Warning: Original property data not found for {lease.property_id}. Skipping details for this lease.")
-
+    
     if property_details_for_display:
         st.dataframe(property_details_for_display, use_container_width=True)
     else:
         st.info("No properties selected in this plan.")
 
 
-    st.markdown(f"**Summary for Plan {plan_idx}:**")
-    st.write(f"  Total Plan Actual Rental Cost: ₹{int(total_plan_actual_cost):,}")
-    st.write(f"  Total Plan Units Leased: {total_plan_units}")
-    st.write(f"  Total Penalty for Partial Leases: ₹{int(total_penalty_for_partial_leases):,}")
-    st.write(f"  Total Penalty for High Occupancy Ratings: ₹{int(total_penalty_for_high_occupancy):,}")
-    st.markdown(f"** TOTAL OBJECTIVE VALUE: ₹{int(total_plan_actual_cost + total_penalty_for_partial_leases + total_penalty_for_high_occupancy):,}**")
-    st.write(f"  Total Properties Selected: {total_properties_selected_in_plan}")
+    st.markdown(f"#### Summary Metrics for Plan {plan_idx}")
+    st.write(f"  Total Plan Actual Rental Cost: ₹{int(metrics['total_plan_actual_cost']):,}")
+    st.write(f"  Total Plan Units Leased: {metrics['total_plan_units']}")
+    st.write(f"  Total Penalty for Partial Leases: ₹{int(metrics['total_penalty_for_partial_leases']):,}")
+    st.write(f"  Total Penalty for High Occupancy Ratings: ₹{int(metrics['total_penalty_for_high_occupancy']):,}")
+    st.markdown(f"** TOTAL OBJECTIVE VALUE: ₹{int(metrics['total_objective_value']):,}**")
+    st.write(f"  Total Properties Selected: {metrics['total_properties_selected']}")
 
-    min_budget_allowed = optimizer.budget
-    max_budget_allowed = optimizer.budget * (1 + optimizer.budget_tolerance)
+    st.write(f"  Minimum Cost Target: ₹{optimizer.budget:,.0f} (Allowed Range: ₹{metrics['min_budget_allowed']:,.0f} - ₹{metrics['max_budget_allowed']:,.0f}) {'✅' if metrics['budget_status'] else '❌'}")
+    st.write(f"  Units Target: {optimizer.units_required} (Range: {metrics['min_units_allowed']:.1f} - {metrics['max_units_allowed']:.1f}) {'✅' if metrics['units_status'] else '❌'}")
 
-    min_units_allowed = optimizer.units_required * (1 - optimizer.unit_tolerance)
-    max_units_allowed = optimizer.units_required * (1 + optimizer.unit_tolerance)
-
-    budget_status = "✅" if min_budget_allowed <= total_plan_actual_cost <= max_budget_allowed else "❌"
-    units_status = "✅" if min_units_allowed <= total_plan_units <= max_units_allowed else "❌"
-
-    st.write(f"  Minimum Cost Target: ₹{optimizer.budget:,.0f} (Allowed Range: ₹{min_budget_allowed:,.0f} - ₹{max_budget_allowed:,.0f}) {budget_status}")
-    st.write(f"  Units Target: {optimizer.units_required} (Range: {min_units_allowed:.1f} - {max_units_allowed:.1f}) {units_status}")
-
-    group_constraint_met_overall = True
-    
-    st.markdown("**Selected Properties by Group:**")
+    st.markdown("#### Selected Properties by Group:")
     group_counts_all_data = {p.group: 0 for p in all_properties_data} # Initialize with all groups from data
     for p in all_properties_data:
-        group_counts_all_data[p.group] += 1
+        group_counts_all_data[p.group] = group_counts_all_data.get(p.group, 0) + 1
 
-    all_groups_present = sorted(list(set(group_counts_all_data.keys()).union(selected_groups.keys())))
+    all_groups_present = sorted(list(set(group_counts_all_data.keys()).union(metrics['selected_groups'].keys())))
     
     group_summary_lines = []
     for group_char in all_groups_present:
-        count = selected_groups.get(group_char, 0)
+        count = metrics['selected_groups'].get(group_char, 0)
         
         if group_char in optimizer.active_groups and optimizer.min_properties_per_group > 0: 
             if count >= optimizer.min_properties_per_group:
@@ -417,7 +467,6 @@ def print_plan_details_st(plan_idx: int, lease_plan: List[LeasePlan], all_proper
                 group_summary_lines.append(f"    Group '{group_char}': {count} properties selected (Required >= {optimizer.min_properties_per_group}) {status_icon}")
             else:
                 status_icon = "❌"
-                group_constraint_met_overall = False
                 group_summary_lines.append(f"    Group '{group_char}': {count} properties selected (Required >= {optimizer.min_properties_per_group}) {status_icon}")
         elif count > 0:
             status_icon = "➖"
@@ -427,7 +476,7 @@ def print_plan_details_st(plan_idx: int, lease_plan: List[LeasePlan], all_proper
     for line in group_summary_lines:
         st.write(line)
 
-    if group_constraint_met_overall:
+    if metrics['group_constraint_met_overall']:
         st.success("✅ All required group constraints met for this plan.")
     else:
         st.error("❌ Some required group constraints NOT met for this plan.")
@@ -551,13 +600,52 @@ if st.button("Run Optimization"):
         explicit_pre_selected_property_ids=valid_pre_selected_ids
     )
 
-    display_optimizer_configuration_st(optimizer)
+    # Display Optimizer Configuration and Solver Time side-by-side
+    st.markdown("### Optimization Run Summary")
+    col_config, col_time = st.columns([3, 1]) # Adjust column ratios for better balance
+    
+    with col_config:
+        with st.expander("View Optimizer Configuration", expanded=True): # Renamed expander title
+            display_optimizer_configuration_content_st(optimizer)
 
-    with st.spinner("Solving... This may take a moment."):
+    with col_time:
+        st.markdown("##### Solver Run Time")
+        total_solve_start_time = time.time()
         plans = optimizer.solve(num_solutions=num_solutions)
+        total_solve_end_time = time.time()
+        total_elapsed_time = total_solve_end_time - total_solve_start_time
+        st.metric(label="Total time to find all plans", value=f"{total_elapsed_time:.2f} seconds")
+
 
     if not plans:
         st.error("❌ No feasible plans found based on the given constraints.")
     else:
-        for idx, plan in enumerate(plans, 1):
-            print_plan_details_st(idx, plan, properties_data, optimizer)
+        st.markdown("---")
+        st.subheader("Summary of Generated Plans")
+        
+        cols_per_row = 3 # Adjust as needed
+        
+        for i in range(0, len(plans), cols_per_row):
+            cols = st.columns(cols_per_row)
+            for j in range(cols_per_row):
+                if (i + j) < len(plans):
+                    plan_idx = i + j + 1
+                    plan = plans[i+j]
+                    
+                    with cols[j]:
+                        st.markdown(f"#### Plan {plan_idx}")
+                        metrics = calculate_plan_metrics(plan, properties_data, optimizer)
+
+                        st.write(f"**Cost:** ₹{int(metrics['total_plan_actual_cost']):,}")
+                        st.write(f"**Units:** {metrics['total_plan_units']}")
+                        st.write(f"**Total Penalty:** ₹{int(metrics['total_penalty_for_partial_leases'] + metrics['total_penalty_for_high_occupancy']):,}")
+                        st.markdown(f"**Objective Value:** ₹{int(metrics['total_objective_value']):,}")
+                        
+                        st.write(f"Budget Status: {'✅' if metrics['budget_status'] else '❌'}")
+                        st.write(f"Units Status: {'✅' if metrics['units_status'] else '❌'}")
+                        st.write(f"Group Status: {'✅' if metrics['group_constraint_met_overall'] else '❌'}")
+                        
+                        # Add a button/expander to view details
+                        with st.expander(f"View Details for Plan {plan_idx}"):
+                            print_plan_details_st(plan_idx, plan, properties_data, optimizer)
+            st.markdown("---") # Separator between rows of summaries
