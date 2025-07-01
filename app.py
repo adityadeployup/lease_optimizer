@@ -678,9 +678,9 @@ def display_optimizer_configuration_content_st(optimizer: LeaseOptimizerMILP):
     st.markdown("### ⚙️ **Optimizer Configuration**")
 
     st.markdown("#### Client Request")
-    st.info(f"**Target Units:** {optimizer.units_required}  \n"
-              f"**Minimum Cost Target:** ₹{optimizer.budget:,.0f}  \n"
-              f"**Lease Duration:** {optimizer.days} days ({optimizer.start_date.strftime('%b %d, %Y')} to {optimizer.end_date.strftime('%b %d, %Y')})")
+    st.info(f"**Target Units:** {optimizer.units_required} \n"
+            f"**Minimum Cost Target:** ₹{optimizer.budget:,.0f} \n"
+            f"**Lease Duration:** {optimizer.days} days ({optimizer.start_date.strftime('%b %d, %Y')} to {optimizer.end_date.strftime('%b %d, %Y')})")
     
     st.markdown("#### Constraints & Penalties")
     col_c1, col_c2 = st.columns(2)
@@ -854,6 +854,7 @@ def print_plan_details_st(
     property_details_for_display = []
     for lease in lease_plan:
         prop_obj_orig = next((p for p in all_properties_data if p.property_id == lease.property_id), None)
+        
         if prop_obj_orig:
             current_rental_for_units = lease.units * lease.effective_rate_per_day * optimizer.days
             pre_selected_indicator = "(PRE-SELECTED)" if lease.pre_selected else ""
@@ -1002,6 +1003,11 @@ def parse_dict_string(dict_string: str) -> Dict[str, int]:
     except Exception as e: raise ValueError(f"Unexpected error parsing dictionary string: {e}")
 
 
+def generate_random_tag(length: int = 4) -> str:
+    """Generates a random alphanumeric tag."""
+    characters = string.ascii_uppercase + string.digits
+    return ''.join(random.choice(characters) for i in range(length))
+
 # --- Streamlit App Layout ---
 st.set_page_config(layout="wide")
 st.title("Rental Lease Optimization App")
@@ -1009,45 +1015,58 @@ st.write("Configure parameters and find optimal lease plans based on your criter
 
 # --- Product Details Data Source (Combined) ---
 st.sidebar.header("Product Details & Discount Limits")
-product_full_details_data_option = st.sidebar.radio(
-    "Select Product Details Data Source:",
-    ("Generate Random Product Details", "Upload CSV File"),
-    key="product_full_details_data_source"
-)
+# Initial state for expander to be open by default
+product_details_expander_default = False
+if 'product_details_expander_state' not in st.session_state:
+    st.session_state.product_details_expander_state = product_details_expander_default
 
-product_full_details_data: List[ProductFullDetail] = []
-if product_full_details_data_option == "Generate Random Product Details":
-    num_product_codes_to_generate_details = st.sidebar.slider("Number of Product Details to Generate", 1, 10, 3)
-    product_full_details_data = generate_random_product_full_details(num_product_codes_to_generate_details)
-    if product_full_details_data:
-        st.sidebar.info(f"Generated {len(product_full_details_data)} random product details.")
+with st.sidebar.expander("Product Details Data Source", expanded=st.session_state.product_details_expander_state):
+    product_full_details_data_option = st.radio(
+        "Select Product Details Data Source:",
+        ("Generate Random Product Details", "Upload CSV File"),
+        key="product_full_details_data_source"
+    )
+
+    product_full_details_data: List[ProductFullDetail] = []
+    product_details_tag = ""
+
+    if product_full_details_data_option == "Generate Random Product Details":
+        num_product_codes_to_generate_details = st.slider("Number of Product Details to Generate", 1, 10, 3)
+        product_full_details_data = generate_random_product_full_details(num_product_codes_to_generate_details)
+        if product_full_details_data:
+            product_details_tag = f" (Randomly Generated - {generate_random_tag()})"
+            st.info(f"Generated {len(product_full_details_data)} random product details.")
+        else:
+            st.warning("No product details generated.")
     else:
-        st.sidebar.warning("No product details generated.")
-else:
-    csv_sample_product_full_details = create_sample_product_full_details_csv_content()
-    st.sidebar.download_button(
-        label="Download Sample Product Details CSV",
-        data=csv_sample_product_full_details,
-        file_name="sample_product_details_full.csv",
-        mime="text/csv",
-        help="Download a sample CSV for Product Details. Expected columns: product_code,base_rate_per_day,default_card_rate_discount,max_discount_applicable."
-    )
-    uploaded_product_full_details_file = st.sidebar.file_uploader(
-        "Choose a CSV file for Product Details",
-        type="csv",
-        help="Expected columns: product_code,base_rate_per_day,default_card_rate_discount,max_discount_applicable."
-    )
-    if uploaded_product_full_details_file is not None:
-        string_data_product_full_details = io.StringIO(uploaded_product_full_details_file.getvalue().decode("utf-8"))
-        try:
-            product_full_details_data = load_product_full_details_from_csv(string_data_product_full_details)
-            if product_full_details_data:
-                st.sidebar.success(f"Loaded **{len(product_full_details_data)}** product details from CSV.")
-            else:
-                st.sidebar.warning("Product Details CSV loaded, but no valid details parsed.")
-        except Exception as e:
-            st.sidebar.error(f"Error processing Product Details CSV: {e}.")
-            product_full_details_data = []
+        csv_sample_product_full_details = create_sample_product_full_details_csv_content()
+        st.download_button(
+            label="Download Sample Product Details CSV",
+            data=csv_sample_product_full_details,
+            file_name="sample_product_details_full.csv",
+            mime="text/csv",
+            help="Download a sample CSV for Product Details. Expected columns: product_code,base_rate_per_day,default_card_rate_discount,max_discount_applicable."
+        )
+        uploaded_product_full_details_file = st.file_uploader(
+            "Choose a CSV file for Product Details",
+            type="csv",
+            help="Expected columns: product_code,base_rate_per_day,default_card_rate_discount,max_discount_applicable."
+        )
+        if uploaded_product_full_details_file is not None:
+            string_data_product_full_details = io.StringIO(uploaded_product_full_details_file.getvalue().decode("utf-8"))
+            try:
+                product_full_details_data = load_product_full_details_from_csv(string_data_product_full_details)
+                if product_full_details_data:
+                    st.success(f"Loaded **{len(product_full_details_data)}** product details from CSV.")
+                else:
+                    st.warning("Product Details CSV loaded, but no valid details parsed.")
+            except Exception as e:
+                st.error(f"Error processing Product Details CSV: {e}.")
+                product_full_details_data = []
+
+# Update expander title dynamically
+st.sidebar.markdown(f'<h3 style="margin-top: 0rem;">Product Details & Discount Limits{product_details_tag}</h3>', unsafe_allow_html=True)
+
 
 if not product_full_details_data:
     st.error("No Product Details loaded or generated. Please provide this data to proceed.")
@@ -1059,43 +1078,59 @@ available_product_codes_from_details = [pfd.product_code for pfd in product_full
 
 # --- Property Data Source ---
 st.sidebar.markdown("---")
-st.sidebar.header("Property Data Source")
-data_source_option = st.sidebar.radio("Select Property Data Source:", ("Generate Random Properties", "Upload CSV File"), key="property_data_source")
+st.sidebar.header("Property Data Source") # This will now be inside the expander
+# Initial state for expander to be open by default
+property_expander_default = False
+if 'property_expander_state' not in st.session_state:
+    st.session_state.property_expander_state = property_expander_default
 
-properties_data: List[Property] = []
-if data_source_option == "Generate Random Properties":
-    num_properties = st.sidebar.slider("Number of Random Properties", 50, 1000, 300)
-    properties_data = generate_random_properties(num_properties, available_product_codes_from_details)
-    st.sidebar.info(f"Generated {len(properties_data)} random properties.")
-else:
-    csv_sample_data = create_sample_properties_csv_content()
-    st.sidebar.download_button(
-        label="Download Sample Property CSV",
-        data=csv_sample_data,
-        file_name="sample_properties.csv",
-        mime="text/csv",
-        help="Download a sample CSV file. Expected columns: property_id,total_units,occupancy_rating,group,city,product_code."
-    )
-    uploaded_file = st.sidebar.file_uploader("Choose a CSV file for Properties", type="csv", help="Expected columns: property_id,total_units,occupancy_rating,group,city,product_code.")
-    if uploaded_file is not None:
-        string_data = io.StringIO(uploaded_file.getvalue().decode("utf-8"))
-        try:
-            properties_data = load_properties_from_csv(string_data)
-            if properties_data:
-                st.sidebar.success(f"Loaded **{len(properties_data)}** properties from CSV.")
-                
-                # Validation: Check if property product codes exist in product_full_details_data
-                missing_prop_codes = set()
-                for p in properties_data:
-                    if p.product_code not in available_product_codes_from_details:
-                        missing_prop_codes.add(p.product_code)
-                if missing_prop_codes:
-                    st.sidebar.error(f"Error: Properties data contains unknown product codes: {', '.join(missing_prop_codes)}. Please ensure all product codes in properties data are defined in Product Details data.")
-                    properties_data = [] # Clear data if consistency issue
-            else: st.sidebar.error("CSV loaded, but no valid properties parsed. Check error messages above.")
-        except Exception as e:
-            st.sidebar.error(f"Error processing Properties CSV: {e}. Please check file format and try again.")
-            properties_data = []
+with st.sidebar.expander("Property Data Source", expanded=st.session_state.property_expander_state):
+    data_source_option = st.radio("Select Property Data Source:", ("Generate Random Properties", "Upload CSV File"), key="property_data_source")
+
+    properties_data: List[Property] = []
+    properties_tag = ""
+
+    if data_source_option == "Generate Random Properties":
+        num_properties = st.slider("Number of Random Properties", 50, 1000, 300)
+        properties_data = generate_random_properties(num_properties, available_product_codes_from_details)
+        if properties_data:
+            properties_tag = f" (Randomly Generated - {generate_random_tag()})"
+            st.info(f"Generated {len(properties_data)} random properties.")
+        else:
+            st.warning("No properties generated.")
+    else:
+        csv_sample_data = create_sample_properties_csv_content()
+        st.download_button(
+            label="Download Sample Property CSV",
+            data=csv_sample_data,
+            file_name="sample_properties.csv",
+            mime="text/csv",
+            help="Download a sample CSV file. Expected columns: property_id,total_units,occupancy_rating,group,city,product_code."
+        )
+        uploaded_file = st.file_uploader("Choose a CSV file for Properties", type="csv", help="Expected columns: property_id,total_units,occupancy_rating,group,city,product_code.")
+        if uploaded_file is not None:
+            string_data = io.StringIO(uploaded_file.getvalue().decode("utf-8"))
+            try:
+                properties_data = load_properties_from_csv(string_data)
+                if properties_data:
+                    st.success(f"Loaded **{len(properties_data)}** properties from CSV.")
+                    
+                    # Validation: Check if property product codes exist in product_full_details_data
+                    missing_prop_codes = set()
+                    for p in properties_data:
+                        if p.product_code not in available_product_codes_from_details:
+                            missing_prop_codes.add(p.product_code)
+                    if missing_prop_codes:
+                        st.error(f"Error: Properties data contains unknown product codes: {', '.join(missing_prop_codes)}. Please ensure all product codes in properties data are defined in Product Details data.")
+                        properties_data = [] # Clear data if consistency issue
+                else: st.error("CSV loaded, but no valid properties parsed. Check error messages above.")
+            except Exception as e:
+                st.error(f"Error processing Properties CSV: {e}. Please check file format and try again.")
+                properties_data = []
+
+# Update expander title dynamically
+st.sidebar.markdown(f'<h3 style="margin-top: 0rem;">Property Data Source{properties_tag}</h3>', unsafe_allow_html=True)
+
 
 if not properties_data:
     st.error("No properties loaded or generated. Please adjust data source settings to proceed.")
@@ -1305,14 +1340,14 @@ if st.button("Run Optimization"):
                         st.write(f"Product Code Units Status: {'✅' if metrics.get('product_code_constraint_met_overall', False) else '❌'}")
 
                         if infeasible_discount_val_step1 > 1e-2:
-                             st.warning("⚠️ Min Budget Not Reached (see details)")
+                            st.warning("⚠️ Min Budget Not Reached (see details)")
                         else:
-                             st.success("✅ Min Budget Achieved")
+                            st.success("✅ Min Budget Achieved")
 
                         if remaining_over_budget_amount > 1e-2:
-                             st.error("❌ Over Max Budget (see details)")
+                            st.error("❌ Over Max Budget (see details)")
                         else:
-                             st.success("✅ Within Max Budget")
+                            st.success("✅ Within Max Budget")
                         
                         with st.expander(f"View Details for Plan {plan_idx}"):
                             print_plan_details_st(plan_idx, plan, properties_data, optimizer, infeasible_discount_value=infeasible_discount_val_step1, remaining_over_budget_amount=remaining_over_budget_amount, adjusted_discounts_per_property=final_adj_discounts)
