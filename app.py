@@ -760,7 +760,7 @@ def calculate_plan_metrics(lease_plan: List[LeasePlan], all_properties_data: Lis
                 selected_cities_units[prop_obj_orig.city] = selected_cities_units.get(prop_obj_orig.city, 0) + lease.units
                 selected_product_codes_units[prop_obj_orig.product_code] = selected_product_codes_units.get(prop_obj_orig.product_code, 0) + lease.units
             
-        total_objective_value = total_plan_actual_cost + total_penalty_for_partial_leases + total_penalty_for_high_occupancy
+        total_objective_value = total_penalty_for_partial_leases + total_penalty_for_high_occupancy
 
         min_budget_allowed = optimizer.budget
         max_budget_allowed = optimizer.budget * (1 + optimizer.budget_tolerance)
@@ -895,7 +895,7 @@ def print_plan_details_st(
     st.write(f"  **Total Plan Units Leased:** {total_plan_units_display}")
     st.write(f"  **Total Penalty for Partial Leases:** {total_penalty_partial_display}")
     st.write(f"  **Total Penalty for High Occupancy Ratings:** {total_penalty_occupancy_display}")
-    st.markdown(f"### **TOTAL OBJECTIVE VALUE:** {total_objective_display}")
+    # st.markdown(f"### **TOTAL OBJECTIVE VALUE:** {total_objective_display}")
     st.write(f"  **Total Properties Selected:** {total_properties_selected_display}")
 
     # Robust formatting for budget and units target ranges
@@ -1370,7 +1370,7 @@ if st.button("Run Optimization"):
                         st.write(f"**Cost:** ₹{int(metrics.get('total_plan_actual_cost',0.0)):,}")
                         st.write(f"**Units:** {metrics.get('total_plan_units',0)}")
                         st.write(f"**Total Penalty:** ₹{int(metrics.get('total_penalty_for_partial_leases',0.0) + metrics.get('total_penalty_for_high_occupancy',0.0)):,}")
-                        st.markdown(f"**Objective Value:** ₹{int(metrics.get('total_objective_value',0.0)):,}")
+                        # st.markdown(f"**Objective Value:** ₹{int(metrics.get('total_objective_value',0.0)):,}")
                         
                         st.write(f"Budget Status: {'✅' if metrics.get('budget_status', False) else '❌'}")
                         st.write(f"Units Status: {'✅' if metrics.get('units_status', False) else '❌'}")
