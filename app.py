@@ -1,6 +1,12 @@
 from pulp import (
     LpProblem, LpVariable, LpMinimize, LpBinary, LpInteger, LpContinuous,
-    lpSum, LpStatusOptimal, LpStatus, value, PULP_CBC_CMD
+    lpSum, value, PULP_CBC_CMD,
+    LpStatusOptimal,
+    LpStatusNotSolved,
+    LpStatusInfeasible,
+    LpStatusUnbounded,
+    LpStatusUndefined,
+    LpStatus
 )
 from datetime import date
 from typing import List, Dict, Optional, Tuple
@@ -66,7 +72,8 @@ class LeaseOptimizerMILP:
         explicit_pre_selected_property_ids: Optional[List[str]] = None,
         min_units_per_city: Optional[Dict[str, int]] = None,
         min_units_per_product_code: Optional[Dict[str, int]] = None,
-        default_max_discount_if_not_specified: float = 40.0 # This default applies if a product_code is NOT in product_full_details
+        default_max_discount_if_not_specified: float = 40.0, # This default applies if a product_code is NOT in product_full_details
+        min_units_for_partial_leasing: int = 50 # NEW PARAMETER
     ):
         self.properties = properties
         self.units_required = units_required
@@ -114,6 +121,7 @@ class LeaseOptimizerMILP:
                         break
 
         self.default_max_discount_if_not_specified = default_max_discount_if_not_specified
+        self.min_units_for_partial_leasing = min_units_for_partial_leasing # Store the new parameter
 
 
     def solve(self, num_solutions: int = 1) -> List[List[LeasePlan]]:
@@ -165,6 +173,11 @@ class LeaseOptimizerMILP:
                 # Constraint: Default discount for this product code must be <= max allowed for that product code
                 # Max discount for this product code is now directly from ProductFullDetail
                 prob += product_detail.default_card_rate_discount * z[i] <= product_detail.max_discount_applicable * z[i], f"Max_Discount_ProductCode_{p.property_id}"
+
+                # MODIFIED CONSTRAINT: If total_units is less than or equal to min_units_for_partial_leasing,
+                # then y[i] must be 1 (full property leased) if selected.
+                if p.total_units <= self.min_units_for_partial_leasing:
+                    prob += y[i] == z[i], f"Force_Full_Lease_If_Units_LTE_{self.min_units_for_partial_leasing}_{i}"
 
 
             # Constraints for pre-selected properties
@@ -259,25 +272,33 @@ class LeaseOptimizerMILP:
                 solver_params['gapRel'] = self.solver_mip_gap
             
             solver = PULP_CBC_CMD(**solver_params)
-            result = prob.solve(solver)
+            result = prob.solve(solver) # Store result which holds the status
             
             elapsed_time = time.time() - start_solve_time
 
-            # Log solver status
+            # Log solver status based on the valid constants
             if prob.status == LpStatusOptimal:
                 st.success(f"Plan {sol_idx+1} found an optimal solution in {elapsed_time:.2f} seconds.")
-            elif prob.status == LpStatusNotSolved and value(prob.objective) is not None:
-                st.info(f"Plan {sol_idx+1} found a feasible solution (not proven optimal) in {elapsed_time:.2f} seconds. Status: {LpStatus[prob.status]}")
-            elif prob.status == LpStatusUserStopped and value(prob.objective) is not None:
-                st.info(f"Plan {sol_idx+1} stopped by user (e.g., time limit) with a feasible solution in {elapsed_time:.2f} seconds. Status: {LpStatus[prob.status]}")
+            elif prob.status == LpStatusNotSolved: # This covers cases like time limit, iterations limit, or found feasible but not proven optimal
+                # Check if an objective value was found, indicating a feasible solution
+                if value(prob.objective) is not None:
+                    st.info(f"Plan {sol_idx+1} found a feasible solution (not proven optimal/stopped) in {elapsed_time:.2f} seconds. Status: {LpStatus[prob.status]}")
+                else:
+                    st.warning(f"Plan {sol_idx+1}: Solver stopped without finding a feasible solution. Status: {LpStatus[prob.status]} (Elapsed: {elapsed_time:.2f}s)")
             elif prob.status == LpStatusInfeasible:
                 st.error(f"Plan {sol_idx+1}: Problem is Infeasible. No solution found. (Elapsed: {elapsed_time:.2f}s)")
                 break
+            elif prob.status == LpStatusUnbounded:
+                st.error(f"Plan {sol_idx+1}: Problem is Unbounded. (Elapsed: {elapsed_time:.2f}s)")
+                break
+            elif prob.status == LpStatusUndefined:
+                st.error(f"Plan {sol_idx+1}: Problem is Undefined (e.g., infeasible or unbounded). (Elapsed: {elapsed_time:.2f}s)")
+                break
             else:
-                st.error(f"Plan {sol_idx+1}: Solver did not find a solution. Status: {LpStatus[prob.status]} (Elapsed: {elapsed_time:.2f}s)")
+                st.error(f"Plan {sol_idx+1}: Solver returned an unknown status: {LpStatus[prob.status]} (Elapsed: {elapsed_time:.2f}s)")
                 break
 
-            if value(prob.objective) is None:
+            if value(prob.objective) is None: # This check is crucial if status is NotSolved but no objective value
                 st.error(f"No feasible solution found for Plan {sol_idx+1}. Stopping further solution search.")
                 break
 
@@ -692,6 +713,7 @@ def display_optimizer_configuration_content_st(optimizer: LeaseOptimizerMILP):
         st.write(f"**Partial Lease Penalty:** ₹{optimizer.full_property_penalty_per_unit:.2f} / unit")
         st.write(f"**High Occupancy Penalty:** ₹{optimizer.occupancy_penalty_per_unit_per_day:.2f} / unit / day")
         st.write(f"**Occupancy Threshold (for penalty):** > {optimizer.occupancy_rating_threshold}")
+        st.write(f"**Min Units for Partial Leasing:** > {optimizer.min_units_for_partial_leasing} units") # Display the new parameter
 
     st.markdown("#### Solver Settings")
     col_s1, col_s2 = st.columns(2)
@@ -750,9 +772,44 @@ def calculate_plan_metrics(lease_plan: List[LeasePlan], all_properties_data: Lis
                 total_plan_units += lease.units
                 total_properties_selected_in_plan += 1
 
-                if not lease.full_property and not lease.pre_selected:
-                    total_penalty_for_partial_leases += optimizer.full_property_penalty_per_unit # Corrected to use optimizer's penalty
+                # Corrected logic for partial lease penalty based on the new parameter
+                if not lease.full_property and lease.units < prop_obj_orig.total_units and prop_obj_orig.total_units > optimizer.min_units_for_partial_leasing:
+                    total_penalty_for_partial_leases += (prop_obj_orig.total_units - lease.units) * optimizer.full_property_penalty_per_unit
+                # Note: The original penalty definition in objective was (z[i] - y[i]) * self.properties[i].total_units * self.full_property_penalty_per_unit
+                # This current metric calculation doesn't perfectly match the solver's internal penalty term definition for 'partial_leases'
+                # if you intend the penalty only for properties with units <= min_units_for_partial_leasing.
+                # If a property has > min_units_for_partial_leasing but is partially leased, the (z[i]-y[i]) term for the solver handles it.
+                # For metrics display, we should align with the original interpretation of "penalty for partial leases"
+                # which was 'total units * penalty per unit' if not full. Let's refine this:
                 
+                # If a property is selected (z[i]=1) but not fully leased (y[i]=0), and it's not pre-selected,
+                # AND it's a property type where partial leasing is *not* allowed (i.e., its units <= min_units_for_partial_leasing)
+                # then there's a penalty.
+                # The solver handles the binary decision variables. The metric here should reflect the "cost" of those decisions.
+
+                # Let's align this metric with the solver's intent:
+                # The solver's constraint `prob += y[i] == z[i], f"Force_Full_Lease_If_Units_LTE_{self.min_units_for_partial_leasing}_{i}"`
+                # means IF p.total_units <= self.min_units_for_partial_leasing, THEN y[i] MUST be 1 if z[i] is 1.
+                # So for these properties, if they are selected, they MUST be full leases. If they are not full, it means problem is infeasible.
+                # The (z[i] - y[i]) penalty is for properties where partial leases *are* allowed (units > min_units_for_partial_leasing).
+                # In such cases, if z[i]=1 and y[i]=0 (partial lease), then (z[i]-y[i]) = 1. So it penalizes the *choice* of partial lease.
+
+                # Re-evaluating the penalty for metrics:
+                # The solver's term `(z[i] - y[i]) * self.properties[i].total_units * self.full_property_penalty_per_unit`
+                # means: if selected (z[i]=1) AND NOT full (y[i]=0), then penalize by `total_units * full_property_penalty_per_unit`.
+                # This applies regardless of min_units_for_partial_leasing.
+                # The `min_units_for_partial_leasing` parameter is about *forcing* full leases for small properties,
+                # not changing the definition of the penalty itself.
+                # So the original `if not lease.full_property and not lease.pre_selected:` logic was probably intended for display.
+                # Let's keep it simple for metrics and reflect the objective function structure:
+
+                # The objective adds a penalty if z[i]=1 and y[i]=0.
+                # We need to find the original property to get total_units for the penalty calculation in metrics.
+                # The penalty is based on the total units of the property if it's partially leased.
+                if not lease.full_property and selected_val == 1: # If property was selected but NOT full
+                    total_penalty_for_partial_leases += prop_obj_orig.total_units * optimizer.full_property_penalty_per_unit
+
+
                 if lease.occupancy_rating_at_selection > optimizer.occupancy_rating_threshold:
                     total_penalty_for_high_occupancy += lease.units * optimizer.occupancy_penalty_per_unit_per_day * optimizer.days
 
@@ -760,7 +817,7 @@ def calculate_plan_metrics(lease_plan: List[LeasePlan], all_properties_data: Lis
                 selected_cities_units[prop_obj_orig.city] = selected_cities_units.get(prop_obj_orig.city, 0) + lease.units
                 selected_product_codes_units[prop_obj_orig.product_code] = selected_product_codes_units.get(prop_obj_orig.product_code, 0) + lease.units
             
-        total_objective_value = total_penalty_for_partial_leases + total_penalty_for_high_occupancy
+        total_objective_value = total_plan_actual_cost + total_penalty_for_partial_leases + total_penalty_for_high_occupancy
 
         min_budget_allowed = optimizer.budget
         max_budget_allowed = optimizer.budget * (1 + optimizer.budget_tolerance)
@@ -837,9 +894,9 @@ def calculate_plan_metrics(lease_plan: List[LeasePlan], all_properties_data: Lis
 
 
 def print_plan_details_st(
-    plan_idx: int, 
-    lease_plan: List[LeasePlan], 
-    all_properties_data: List[Property], 
+    plan_idx: int,
+    lease_plan: List[LeasePlan],
+    all_properties_data: List[Property],
     optimizer: LeaseOptimizerMILP,
     infeasible_discount_value: float = 0.0,
     remaining_over_budget_amount: float = 0.0,
@@ -867,6 +924,7 @@ def print_plan_details_st(
                 "Product Code": prop_obj_orig.product_code,
                 "Group": prop_obj_orig.group,
                 "Units Leased": lease.units,
+                "Total Units": prop_obj_orig.total_units, # Added for context
                 "Base Rate/Day": f"₹{lease.original_rate_per_day:.2f}",
                 "Initial Discount (%)": f"{lease.card_rate_discount_at_selection:.1f}%",
                 "Final Discount (%)": f"{final_discount_pct:.1f}%",
@@ -895,7 +953,7 @@ def print_plan_details_st(
     st.write(f"  **Total Plan Units Leased:** {total_plan_units_display}")
     st.write(f"  **Total Penalty for Partial Leases:** {total_penalty_partial_display}")
     st.write(f"  **Total Penalty for High Occupancy Ratings:** {total_penalty_occupancy_display}")
-    # st.markdown(f"### **TOTAL OBJECTIVE VALUE:** {total_objective_display}")
+    # st.markdown(f"### **TOTAL OBJECTIVE VALUE:** ₹{int(metrics.get('total_objective_value',0.0)):,}")
     st.write(f"  **Total Properties Selected:** {total_properties_selected_display}")
 
     # Robust formatting for budget and units target ranges
@@ -914,10 +972,10 @@ def print_plan_details_st(
     if infeasible_discount_value > 1e-2:
         st.warning(f"⚠️ **Min Budget Fill-up Infeasible Discount:** ₹{int(infeasible_discount_value):,} (Couldn't apply enough discount to reach minimum budget target due to caps.)")
     else:
-        st.success("✅ Min Budget Fill-up Achieved.")
+        st.success("✅ Min Budget Achieved.")
 
     if remaining_over_budget_amount > 1e-2:
-        st.error(f"❌ **Remaining Over Max Budget:** ₹{int(remaining_over_budget_amount):,} (Plan still exceeds max allowed budget after all possible discounts.)")
+        st.error("❌ **Remaining Over Max Budget:** ₹{int(remaining_over_budget_amount):,} (Plan still exceeds max allowed budget after all possible discounts.)")
     else:
         st.success("✅ Within Max Budget")
 
@@ -1164,40 +1222,46 @@ if product_full_details_data and properties_data:
     for note in data_source_notes:
         st.sidebar.caption(note)
 else:
-    st.sidebar.info("Upload data to see summary.")
+    # This else block is now redundant because of the earlier check and stop, but kept for robustness
+    pass 
 
 st.sidebar.subheader("Dataset Summary")
 
-if product_full_details_data and properties_data:
-    num_products = len(product_full_details_data)
-    total_units_available = sum(p.total_units for p in properties_data)
-    
-    # Calculate average rent per unit per day
-    total_weighted_rent = 0.0
-    total_units_for_avg_rent = 0
-    for p in properties_data:
-        # Check if product code exists in the loaded product details map
-        if p.product_code in [pfd.product_code for pfd in product_full_details_data]:
-            pfd = next(pfd_item for pfd_item in product_full_details_data if pfd_item.product_code == p.product_code)
-            effective_rate = pfd.base_rate_per_day * (1 - pfd.default_card_rate_discount / 100.0)
-            total_weighted_rent += effective_rate * p.total_units
-            total_units_for_avg_rent += p.total_units
-    
-    avg_rent_per_unit_per_day = total_weighted_rent / total_units_for_avg_rent if total_units_for_avg_rent > 0 else 0.0
+# Calculation for average rent per unit per day is still useful for display, even if not used for defaults
+total_units_available = sum(p.total_units for p in properties_data)
+total_weighted_rent = 0.0
+total_units_for_avg_rent = 0
+for p in properties_data:
+    if p.product_code in [pfd.product_code for pfd in product_full_details_data]:
+        pfd = next(pfd_item for pfd_item in product_full_details_data if pfd_item.product_code == p.product_code)
+        effective_rate = pfd.base_rate_per_day * (1 - pfd.default_card_rate_discount / 100.0)
+        total_weighted_rent += effective_rate * p.total_units
+        total_units_for_avg_rent += p.total_units
 
-    st.sidebar.metric("Number of Product Types", num_products)
-    st.sidebar.metric("Total Units Available", total_units_available)
-    st.sidebar.metric("Avg. Rent per Unit per Day", f"₹{avg_rent_per_unit_per_day:,.2f}")
-else:
-    # This else block is now redundant because of the earlier check and stop, but kept for robustness
-    pass 
+avg_rent_per_unit_per_day = total_weighted_rent / total_units_for_avg_rent if total_units_for_avg_rent > 0 else 0.0
+
+st.sidebar.metric("Number of Product Types", len(product_full_details_data))
+st.sidebar.metric("Total Units Available", total_units_available)
+st.sidebar.metric("Avg. Rent per Unit per Day", f"₹{avg_rent_per_unit_per_day:,.2f}")
+
 
 # --- Lease Period ---
 st.sidebar.markdown("---")
 st.sidebar.header("Lease Period")
 col1, col2 = st.sidebar.columns(2)
-start_date_val = col1.date_input("Start Date", date(2025, 7, 1))
-end_date_val = col2.date_input("End Date", date(2025, 7, 10))
+# Using current date + 1 day and +10 days for default start/end, considering the current context.
+today = date.today()
+current_year = today.year
+current_month = today.month
+current_day = today.day
+
+# Set default start date to next day if possible, or start of next month/year
+# Using a fixed date from the prompt example for consistency with the last complete code provided
+default_start_date = date(2025, 7, 4) 
+default_end_date = date(2025, 7, 14) 
+
+start_date_val = col1.date_input("Start Date", default_start_date)
+end_date_val = col2.date_input("End Date", default_end_date)
 
 lease_days = (end_date_val - start_date_val).days + 1
 if lease_days <= 0:
@@ -1210,7 +1274,7 @@ if lease_days <= 0:
 # Basic Controls
 with st.sidebar.expander("🎯 Basic Client Requirements", expanded=True):
     units_required = st.number_input("Target Units Required", value=100, min_value=1, step=1)
-    budget = st.number_input("Minimum Cost Target (₹)", value=100000.0, min_value=1.0, step=1000.0) # Ensure float for budget
+    budget = st.number_input("Minimum Cost Target (₹)", value=100000.0, min_value=1.0, step=1000.0) 
     budget_tolerance_percent = st.slider("Budget Upper Tolerance (%)", 0.0, 50.0, 10.0, help="Allows final cost to be up to this percentage above the Minimum Cost Target.")
     unit_tolerance_percent = st.slider("Units Tolerance (%)", 0.0, 50.0, 15.0, help="Allows final units to be within +/- this percentage of Target Units Required.")
 
@@ -1238,6 +1302,15 @@ with st.sidebar.expander("⚙️ Admin Settings & Penalties", expanded=False):
     full_property_penalty_per_unit = st.number_input("Partial Lease Penalty (₹/unit)", value=50.0, min_value=0.0, help="Penalty for each unit short of a full property lease, if property is selected.")
     occupancy_penalty_per_unit_per_day = st.number_input("High Occupancy Penalty (₹/unit/day)", value=150.0, min_value=0.0, help="Penalty applied per unit per day for properties whose Occupancy Rating is above the threshold.")
     occupancy_rating_threshold = st.slider("Occupancy Rating Threshold (for penalty)", 1, 10, 6, help="Properties with an Occupancy Rating *greater than* this value will incur a penalty.")
+    
+    # NEW PARAMETER FOR MINIMUM PROPERTY SIZE FOR PARTIAL LEASING
+    min_units_for_partial_leasing = st.number_input(
+        "Minimum Property Size for Partial Leasing (units)",
+        value=50, # Default value of 50 units
+        min_value=0, # Can be 0 to effectively disable the constraint
+        help="Properties with total units less than or equal to this value must be leased entirely if selected. Set to 0 to allow partial leasing for all properties regardless of size."
+    )
+
     solver_time_limit_seconds = st.number_input("Solver Time Limit (seconds/plan)", value=10, min_value=1, help="Maximum time the solver will run for each individual plan before returning the best solution found so far.")
     solver_mip_gap = st.slider("Solver MIP Gap (%)", 0.0, 10.0, 5.0, help="Solver stops when the solution is guaranteed to be within this percentage of the true optimal value.") / 100.0
     num_solutions = st.slider("Number of Solutions to Find", 1, 5, 3, help="The optimizer will attempt to find this many distinct optimal/near-optimal solutions.")
@@ -1300,7 +1373,8 @@ if st.button("Run Optimization"):
         explicit_pre_selected_property_ids=valid_pre_selected_ids,
         min_units_per_city=parsed_min_units_per_city,
         min_units_per_product_code=parsed_min_units_per_product_code,
-        default_max_discount_if_not_specified=default_max_discount_if_not_specified
+        default_max_discount_if_not_specified=default_max_discount_if_not_specified,
+        min_units_for_partial_leasing=min_units_for_partial_leasing # Pass the new parameter
     )
 
     st.markdown("### Optimization Run Summary")
