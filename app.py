@@ -919,7 +919,7 @@ def print_plan_details_st(
     if remaining_over_budget_amount > 1e-2:
         st.error(f"❌ **Remaining Over Max Budget:** ₹{int(remaining_over_budget_amount):,} (Plan still exceeds max allowed budget after all possible discounts.)")
     else:
-        st.success("✅ Plan is within or below max allowed budget after adjustments.")
+        st.success("✅ Within Max Budget")
 
 
     st.markdown("#### Selected Properties by Group:")
@@ -1013,14 +1013,21 @@ st.set_page_config(layout="wide")
 st.title("Rental Lease Optimization App")
 st.write("Configure parameters and find optimal lease plans based on your criteria.")
 
-# --- Product Details Data Source (Combined) ---
-st.sidebar.header("Product Details & Discount Limits")
-# Initial state for expander to be open by default
-product_details_expander_default = False
-if 'product_details_expander_state' not in st.session_state:
-    st.session_state.product_details_expander_state = product_details_expander_default
+# Initialize session state for data source tracking if not already present
+if 'product_details_random_generated' not in st.session_state:
+    st.session_state.product_details_random_generated = False
+if 'properties_random_generated' not in st.session_state:
+    st.session_state.properties_random_generated = False
 
-with st.sidebar.expander("Product Details Data Source", expanded=st.session_state.product_details_expander_state):
+# --- Data Source Section (Combined) ---
+st.sidebar.header("Data Input & Configuration")
+data_source_expander_default = False # Keep this closed by default
+if 'data_source_expander_state' not in st.session_state:
+    st.session_state.data_source_expander_state = data_source_expander_default
+
+with st.sidebar.expander("Upload/Generate Product Data", expanded=st.session_state.data_source_expander_state):
+    
+    st.markdown("#### Product Details & Discount Limits")
     product_full_details_data_option = st.radio(
         "Select Product Details Data Source:",
         ("Generate Random Product Details", "Upload CSV File"),
@@ -1028,16 +1035,16 @@ with st.sidebar.expander("Product Details Data Source", expanded=st.session_stat
     )
 
     product_full_details_data: List[ProductFullDetail] = []
-    product_details_tag = ""
-
+    
     if product_full_details_data_option == "Generate Random Product Details":
-        num_product_codes_to_generate_details = st.slider("Number of Product Details to Generate", 1, 10, 3)
+        num_product_codes_to_generate_details = st.slider("Number of Product Details to Generate", 1, 10, 3, key="num_prod_codes_gen")
         product_full_details_data = generate_random_product_full_details(num_product_codes_to_generate_details)
         if product_full_details_data:
-            product_details_tag = f" (Randomly Generated - {generate_random_tag()})"
             st.info(f"Generated {len(product_full_details_data)} random product details.")
+            st.session_state.product_details_random_generated = True
         else:
             st.warning("No product details generated.")
+            st.session_state.product_details_random_generated = False
     else:
         csv_sample_product_full_details = create_sample_product_full_details_csv_content()
         st.download_button(
@@ -1050,6 +1057,7 @@ with st.sidebar.expander("Product Details Data Source", expanded=st.session_stat
         uploaded_product_full_details_file = st.file_uploader(
             "Choose a CSV file for Product Details",
             type="csv",
+            key="upload_product_full_details_file",
             help="Expected columns: product_code,base_rate_per_day,default_card_rate_discount,max_discount_applicable."
         )
         if uploaded_product_full_details_file is not None:
@@ -1058,14 +1066,17 @@ with st.sidebar.expander("Product Details Data Source", expanded=st.session_stat
                 product_full_details_data = load_product_full_details_from_csv(string_data_product_full_details)
                 if product_full_details_data:
                     st.success(f"Loaded **{len(product_full_details_data)}** product details from CSV.")
+                    st.session_state.product_details_random_generated = False
                 else:
                     st.warning("Product Details CSV loaded, but no valid details parsed.")
+                    st.session_state.product_details_random_generated = False
             except Exception as e:
                 st.error(f"Error processing Product Details CSV: {e}.")
                 product_full_details_data = []
-
-# Update expander title dynamically
-st.sidebar.markdown(f'<h3 style="margin-top: 0rem;">Product Details & Discount Limits{product_details_tag}</h3>', unsafe_allow_html=True)
+                st.session_state.product_details_random_generated = False
+        else:
+            # If nothing is uploaded and random was not chosen, ensure flag is false
+            st.session_state.product_details_random_generated = False
 
 
 if not product_full_details_data:
@@ -1075,29 +1086,22 @@ if not product_full_details_data:
 # Get available product codes from the loaded/generated ProductFullDetail for consistency checks
 available_product_codes_from_details = [pfd.product_code for pfd in product_full_details_data]
 
-
-# --- Property Data Source ---
-st.sidebar.markdown("---")
-st.sidebar.header("Property Data Source") # This will now be inside the expander
-# Initial state for expander to be open by default
-property_expander_default = False
-if 'property_expander_state' not in st.session_state:
-    st.session_state.property_expander_state = property_expander_default
-
-with st.sidebar.expander("Property Data Source", expanded=st.session_state.property_expander_state):
+with st.sidebar.expander("Upload/Generate Property Data", expanded=st.session_state.data_source_expander_state): # Re-use the same expander
+    st.markdown("---") # Separator within the expander
+    st.markdown("#### Property Data Source")
     data_source_option = st.radio("Select Property Data Source:", ("Generate Random Properties", "Upload CSV File"), key="property_data_source")
 
     properties_data: List[Property] = []
-    properties_tag = ""
-
+    
     if data_source_option == "Generate Random Properties":
-        num_properties = st.slider("Number of Random Properties", 50, 1000, 300)
+        num_properties = st.slider("Number of Random Properties", 50, 1000, 300, key="num_properties_gen")
         properties_data = generate_random_properties(num_properties, available_product_codes_from_details)
         if properties_data:
-            properties_tag = f" (Randomly Generated - {generate_random_tag()})"
             st.info(f"Generated {len(properties_data)} random properties.")
+            st.session_state.properties_random_generated = True
         else:
             st.warning("No properties generated.")
+            st.session_state.properties_random_generated = False
     else:
         csv_sample_data = create_sample_properties_csv_content()
         st.download_button(
@@ -1107,13 +1111,14 @@ with st.sidebar.expander("Property Data Source", expanded=st.session_state.prope
             mime="text/csv",
             help="Download a sample CSV file. Expected columns: property_id,total_units,occupancy_rating,group,city,product_code."
         )
-        uploaded_file = st.file_uploader("Choose a CSV file for Properties", type="csv", help="Expected columns: property_id,total_units,occupancy_rating,group,city,product_code.")
+        uploaded_file = st.file_uploader("Choose a CSV file for Properties", type="csv", key="upload_property_file", help="Expected columns: property_id,total_units,occupancy_rating,group,city,product_code.")
         if uploaded_file is not None:
             string_data = io.StringIO(uploaded_file.getvalue().decode("utf-8"))
             try:
                 properties_data = load_properties_from_csv(string_data)
                 if properties_data:
                     st.success(f"Loaded **{len(properties_data)}** properties from CSV.")
+                    st.session_state.properties_random_generated = False
                     
                     # Validation: Check if property product codes exist in product_full_details_data
                     missing_prop_codes = set()
@@ -1123,19 +1128,69 @@ with st.sidebar.expander("Property Data Source", expanded=st.session_state.prope
                     if missing_prop_codes:
                         st.error(f"Error: Properties data contains unknown product codes: {', '.join(missing_prop_codes)}. Please ensure all product codes in properties data are defined in Product Details data.")
                         properties_data = [] # Clear data if consistency issue
-                else: st.error("CSV loaded, but no valid properties parsed. Check error messages above.")
+                        st.session_state.properties_random_generated = False # If error, set back to false
+                else: 
+                    st.error("CSV loaded, but no valid properties parsed. Check error messages above.")
+                    st.session_state.properties_random_generated = False
             except Exception as e:
                 st.error(f"Error processing Properties CSV: {e}. Please check file format and try again.")
                 properties_data = []
-
-# Update expander title dynamically
-st.sidebar.markdown(f'<h3 style="margin-top: 0rem;">Property Data Source{properties_tag}</h3>', unsafe_allow_html=True)
+                st.session_state.properties_random_generated = False
+        else:
+            # If nothing is uploaded and random was not chosen, ensure flag is false
+            st.session_state.properties_random_generated = False
 
 
 if not properties_data:
     st.error("No properties loaded or generated. Please adjust data source settings to proceed.")
     st.stop()
 
+# --- Summary below the expander ---
+st.sidebar.markdown("---")
+
+# Display notes ABOVE the subheader
+if product_full_details_data and properties_data:
+    data_source_notes = []
+    if st.session_state.product_details_random_generated:
+        data_source_notes.append("Product Details: **Randomly Generated** 🎲")
+    else:
+        data_source_notes.append("Product Details: **Uploaded CSV** 📁")
+
+    if st.session_state.properties_random_generated:
+        data_source_notes.append("Property Data: **Randomly Generated** 🎲")
+    else:
+        data_source_notes.append("Property Data: **Uploaded CSV** 📁")
+    
+    for note in data_source_notes:
+        st.sidebar.caption(note)
+else:
+    st.sidebar.info("Upload data to see summary.")
+
+st.sidebar.subheader("Dataset Summary")
+
+if product_full_details_data and properties_data:
+    num_products = len(product_full_details_data)
+    total_units_available = sum(p.total_units for p in properties_data)
+    
+    # Calculate average rent per unit per day
+    total_weighted_rent = 0.0
+    total_units_for_avg_rent = 0
+    for p in properties_data:
+        # Check if product code exists in the loaded product details map
+        if p.product_code in [pfd.product_code for pfd in product_full_details_data]:
+            pfd = next(pfd_item for pfd_item in product_full_details_data if pfd_item.product_code == p.product_code)
+            effective_rate = pfd.base_rate_per_day * (1 - pfd.default_card_rate_discount / 100.0)
+            total_weighted_rent += effective_rate * p.total_units
+            total_units_for_avg_rent += p.total_units
+    
+    avg_rent_per_unit_per_day = total_weighted_rent / total_units_for_avg_rent if total_units_for_avg_rent > 0 else 0.0
+
+    st.sidebar.metric("Number of Product Types", num_products)
+    st.sidebar.metric("Total Units Available", total_units_available)
+    st.sidebar.metric("Avg. Rent per Unit per Day", f"₹{avg_rent_per_unit_per_day:,.2f}")
+else:
+    # This else block is now redundant because of the earlier check and stop, but kept for robustness
+    pass 
 
 # --- Lease Period ---
 st.sidebar.markdown("---")
@@ -1149,29 +1204,13 @@ if lease_days <= 0:
     st.sidebar.error("End Date must be after Start Date.")
     st.stop()
 
-# Estimate initial units/budget using product details
-estimated_units = max(1, int(sum(p.total_units for p in properties_data) * 0.4))
-avg_effective_rate_overall = 0.0
-total_properties_with_valid_product_detail = 0
-for p in properties_data:
-    # Ensure product code exists (should be guaranteed by earlier check if properties_data is not empty)
-    if p.product_code in available_product_codes_from_details:
-        pfd_obj = next(pfd for pfd in product_full_details_data if pfd.product_code == p.product_code)
-        avg_effective_rate_overall += pfd_obj.base_rate_per_day * (1 - pfd_obj.default_card_rate_discount / 100.0)
-        total_properties_with_valid_product_detail += 1
-if total_properties_with_valid_product_detail > 0:
-    avg_effective_rate_overall /= total_properties_with_valid_product_detail
-else:
-    avg_effective_rate_overall = 1000.0
-estimated_budget_val = int(estimated_units * avg_effective_rate_overall * lease_days * 1.05)
-
 
 # --- Grouped Controls ---
 
 # Basic Controls
 with st.sidebar.expander("🎯 Basic Client Requirements", expanded=True):
-    units_required = st.number_input("Target Units Required", value=estimated_units, min_value=1)
-    budget = st.number_input("Minimum Cost Target (₹)", value=float(estimated_budget_val), min_value=1.0)
+    units_required = st.number_input("Target Units Required", value=100, min_value=1, step=1)
+    budget = st.number_input("Minimum Cost Target (₹)", value=100000.0, min_value=1.0, step=1000.0) # Ensure float for budget
     budget_tolerance_percent = st.slider("Budget Upper Tolerance (%)", 0.0, 50.0, 10.0, help="Allows final cost to be up to this percentage above the Minimum Cost Target.")
     unit_tolerance_percent = st.slider("Units Tolerance (%)", 0.0, 50.0, 15.0, help="Allows final units to be within +/- this percentage of Target Units Required.")
 
