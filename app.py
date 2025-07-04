@@ -772,41 +772,19 @@ def calculate_plan_metrics(lease_plan: List[LeasePlan], all_properties_data: Lis
                 total_plan_units += lease.units
                 total_properties_selected_in_plan += 1
 
-                # Corrected logic for partial lease penalty based on the new parameter
-                if not lease.full_property and lease.units < prop_obj_orig.total_units and prop_obj_orig.total_units > optimizer.min_units_for_partial_leasing:
-                    total_penalty_for_partial_leases += (prop_obj_orig.total_units - lease.units) * optimizer.full_property_penalty_per_unit
-                # Note: The original penalty definition in objective was (z[i] - y[i]) * self.properties[i].total_units * self.full_property_penalty_per_unit
-                # This current metric calculation doesn't perfectly match the solver's internal penalty term definition for 'partial_leases'
-                # if you intend the penalty only for properties with units <= min_units_for_partial_leasing.
-                # If a property has > min_units_for_partial_leasing but is partially leased, the (z[i]-y[i]) term for the solver handles it.
-                # For metrics display, we should align with the original interpretation of "penalty for partial leases"
-                # which was 'total units * penalty per unit' if not full. Let's refine this:
-                
-                # If a property is selected (z[i]=1) but not fully leased (y[i]=0), and it's not pre-selected,
-                # AND it's a property type where partial leasing is *not* allowed (i.e., its units <= min_units_for_partial_leasing)
-                # then there's a penalty.
-                # The solver handles the binary decision variables. The metric here should reflect the "cost" of those decisions.
-
-                # Let's align this metric with the solver's intent:
-                # The solver's constraint `prob += y[i] == z[i], f"Force_Full_Lease_If_Units_LTE_{self.min_units_for_partial_leasing}_{i}"`
-                # means IF p.total_units <= self.min_units_for_partial_leasing, THEN y[i] MUST be 1 if z[i] is 1.
-                # So for these properties, if they are selected, they MUST be full leases. If they are not full, it means problem is infeasible.
-                # The (z[i] - y[i]) penalty is for properties where partial leases *are* allowed (units > min_units_for_partial_leasing).
-                # In such cases, if z[i]=1 and y[i]=0 (partial lease), then (z[i]-y[i]) = 1. So it penalizes the *choice* of partial lease.
-
                 # Re-evaluating the penalty for metrics:
                 # The solver's term `(z[i] - y[i]) * self.properties[i].total_units * self.full_property_penalty_per_unit`
                 # means: if selected (z[i]=1) AND NOT full (y[i]=0), then penalize by `total_units * full_property_penalty_per_unit`.
                 # This applies regardless of min_units_for_partial_leasing.
                 # The `min_units_for_partial_leasing` parameter is about *forcing* full leases for small properties,
                 # not changing the definition of the penalty itself.
-                # So the original `if not lease.full_property and not lease.pre_selected:` logic was probably intended for display.
-                # Let's keep it simple for metrics and reflect the objective function structure:
-
-                # The objective adds a penalty if z[i]=1 and y[i]=0.
+                
                 # We need to find the original property to get total_units for the penalty calculation in metrics.
                 # The penalty is based on the total units of the property if it's partially leased.
-                if not lease.full_property and selected_val == 1: # If property was selected but NOT full
+                # Note: The 'selected_val' is not available here; we use 'lease.full_property' and 'lease.units < prop_obj_orig.total_units'
+                # to infer a partial lease. A more precise mapping to the solver's `(z[i] - y[i])` would be to verify
+                # `lease.full_property` (which is `y[i]` from solver) and assume `z[i]` is 1 if it's in the plan.
+                if not lease.full_property and lease.units < prop_obj_orig.total_units: # If selected but not full
                     total_penalty_for_partial_leases += prop_obj_orig.total_units * optimizer.full_property_penalty_per_unit
 
 
@@ -909,6 +887,12 @@ def print_plan_details_st(
     st.markdown(f"#### Properties in Plan {plan_idx}")
     
     property_details_for_display = []
+    
+    # New dictionaries to accumulate data for product code averages
+    product_code_effective_cost: Dict[str, float] = {}
+    product_code_original_cost: Dict[str, float] = {}
+    product_code_total_units: Dict[str, int] = {}
+
     for lease in lease_plan:
         prop_obj_orig = next((p for p in all_properties_data if p.property_id == lease.property_id), None)
         
@@ -933,7 +917,13 @@ def print_plan_details_st(
                 "Cost for Property": f"₹{int(current_rental_for_units):,}",
                 "Status": pre_selected_indicator
             })
-    
+
+            # Accumulate data for product code averages
+            product_code = prop_obj_orig.product_code
+            product_code_effective_cost[product_code] = product_code_effective_cost.get(product_code, 0.0) + current_rental_for_units
+            product_code_original_cost[product_code] = product_code_original_cost.get(product_code, 0.0) + (lease.units * lease.original_rate_per_day * optimizer.days)
+            product_code_total_units[product_code] = product_code_total_units.get(product_code, 0) + lease.units
+            
     if property_details_for_display:
         st.dataframe(property_details_for_display, use_container_width=True)
     else:
@@ -1035,6 +1025,30 @@ def print_plan_details_st(
             st.error("❌ **Some minimum units per product code constraints NOT met.**")
     else:
         st.info("No minimum units per product code constraints specified.")
+
+    st.markdown("#### Final Average Metrics per Product Code:")
+    if product_code_effective_cost:
+        product_code_avg_metrics_display = []
+        for pc, effective_cost in product_code_effective_cost.items():
+            total_units_pc = product_code_total_units[pc]
+            original_cost_pc = product_code_original_cost[pc]
+            
+            avg_effective_price_per_unit_per_day = effective_cost / (total_units_pc * optimizer.days) if (total_units_pc * optimizer.days) > 0 else 0.0
+            
+            # Calculate average discount percentage
+            avg_discount_pct = 0.0
+            if original_cost_pc > 0:
+                avg_discount_pct = (1 - (effective_cost / original_cost_pc)) * 100
+
+            product_code_avg_metrics_display.append({
+                "Product Code": pc,
+                "Units Leased": total_units_pc,
+                "Avg. Effective Price/Unit/Day": f"₹{avg_effective_price_per_unit_per_day:.2f}",
+                "Avg. Discount Applied (%)": f"{avg_discount_pct:.1f}%"
+            })
+        st.dataframe(product_code_avg_metrics_display, use_container_width=True)
+    else:
+        st.info("No product code specific average metrics available (no properties selected).")
 
 
 # --- Helper for parsing dict string ---
