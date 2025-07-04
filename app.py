@@ -361,7 +361,7 @@ def load_product_full_details_from_csv(file_obj) -> List[ProductFullDetail]:
             if default_card_rate_discount > max_discount_applicable: raise ValueError(f"default_card_rate_discount ({default_card_rate_discount}%) cannot be greater than max_discount_applicable ({max_discount_applicable}%) for product_code '{product_code}'.")
 
 
-            product_full_details.append(ProductFullDetail(product_code, base_rate_per_day, default_card_rate_discount, max_discount_applicable))
+            product_full_details.append(ProductFullDetail(product_code, base_rate_per_day, round(default_card_rate_discount,1), round(max_discount_applicable,1)))
         except KeyError as ke:
             st.error(f"Error: Missing column '{ke}' in Product Details CSV row {line_num}. Row skipped.")
         except ValueError as ve:
@@ -776,8 +776,6 @@ def calculate_plan_metrics(lease_plan: List[LeasePlan], all_properties_data: Lis
                 # The solver's term `(z[i] - y[i]) * self.properties[i].total_units * self.full_property_penalty_per_unit`
                 # means: if selected (z[i]=1) AND NOT full (y[i]=0), then penalize by `total_units * full_property_penalty_per_unit`.
                 # This applies regardless of min_units_for_partial_leasing.
-                # The `min_units_for_partial_leasing` parameter is about *forcing* full leases for small properties,
-                # not changing the definition of the penalty itself.
                 
                 # We need to find the original property to get total_units for the penalty calculation in metrics.
                 # The penalty is based on the total units of the property if it's partially leased.
@@ -1086,16 +1084,20 @@ st.title("Rental Lease Optimization App")
 st.write("Configure parameters and find optimal lease plans based on your criteria.")
 
 # Initialize session state for data source tracking if not already present
+if 'product_details_data' not in st.session_state:
+    st.session_state.product_details_data = []
+if 'properties_data' not in st.session_state:
+    st.session_state.properties_data = []
 if 'product_details_random_generated' not in st.session_state:
     st.session_state.product_details_random_generated = False
 if 'properties_random_generated' not in st.session_state:
     st.session_state.properties_random_generated = False
+if 'data_source_expander_state' not in st.session_state:
+    st.session_state.data_source_expander_state = False # Keep this closed by default
 
 # --- Data Source Section (Combined) ---
 st.sidebar.header("Data Input & Configuration")
-data_source_expander_default = False # Keep this closed by default
-if 'data_source_expander_state' not in st.session_state:
-    st.session_state.data_source_expander_state = data_source_expander_default
+
 
 with st.sidebar.expander("Upload/Generate Product Data", expanded=st.session_state.data_source_expander_state):
     
@@ -1106,18 +1108,20 @@ with st.sidebar.expander("Upload/Generate Product Data", expanded=st.session_sta
         key="product_full_details_data_source"
     )
 
-    product_full_details_data: List[ProductFullDetail] = []
-    
+    # Use a flag to check if we need to regenerate/reload product data
+    product_data_needs_update = False
     if product_full_details_data_option == "Generate Random Product Details":
         num_product_codes_to_generate_details = st.slider("Number of Product Details to Generate", 1, 10, 3, key="num_prod_codes_gen")
-        product_full_details_data = generate_random_product_full_details(num_product_codes_to_generate_details)
-        if product_full_details_data:
-            st.info(f"Generated {len(product_full_details_data)} random product details.")
+        if not st.session_state.product_details_random_generated or \
+           len(st.session_state.product_details_data) != num_product_codes_to_generate_details: # Regenerate if count changes
+            product_full_details_data = generate_random_product_full_details(num_product_codes_to_generate_details)
+            st.session_state.product_details_data = product_full_details_data
             st.session_state.product_details_random_generated = True
-        else:
-            st.warning("No product details generated.")
-            st.session_state.product_details_random_generated = False
-    else:
+            if product_full_details_data:
+                st.info(f"Generated {len(product_full_details_data)} random product details.")
+            else:
+                st.warning("No product details generated.")
+    else: # Upload CSV
         csv_sample_product_full_details = create_sample_product_full_details_csv_content()
         st.download_button(
             label="Download Sample Product Details CSV",
@@ -1133,24 +1137,33 @@ with st.sidebar.expander("Upload/Generate Product Data", expanded=st.session_sta
             help="Expected columns: product_code,base_rate_per_day,default_card_rate_discount,max_discount_applicable."
         )
         if uploaded_product_full_details_file is not None:
-            string_data_product_full_details = io.StringIO(uploaded_product_full_details_file.getvalue().decode("utf-8"))
-            try:
-                product_full_details_data = load_product_full_details_from_csv(string_data_product_full_details)
-                if product_full_details_data:
-                    st.success(f"Loaded **{len(product_full_details_data)}** product details from CSV.")
+            # Check if the uploaded file has changed
+            if 'last_uploaded_product_details_hash' not in st.session_state or \
+               st.session_state.last_uploaded_product_details_hash != uploaded_product_full_details_file.file_id:
+                
+                string_data_product_full_details = io.StringIO(uploaded_product_full_details_file.getvalue().decode("utf-8"))
+                try:
+                    product_full_details_data = load_product_full_details_from_csv(string_data_product_full_details)
+                    if product_full_details_data:
+                        st.success(f"Loaded **{len(product_full_details_data)}** product details from CSV.")
+                        st.session_state.product_details_data = product_full_details_data
+                        st.session_state.product_details_random_generated = False
+                        st.session_state.last_uploaded_product_details_hash = uploaded_product_full_details_file.file_id
+                    else:
+                        st.warning("Product Details CSV loaded, but no valid details parsed.")
+                        st.session_state.product_details_data = [] # Clear data if no valid details
+                        st.session_state.product_details_random_generated = False
+                except Exception as e:
+                    st.error(f"Error processing Product Details CSV: {e}.")
+                    st.session_state.product_details_data = []
                     st.session_state.product_details_random_generated = False
-                else:
-                    st.warning("Product Details CSV loaded, but no valid details parsed.")
-                    st.session_state.product_details_random_generated = False
-            except Exception as e:
-                st.error(f"Error processing Product Details CSV: {e}.")
-                product_full_details_data = []
-                st.session_state.product_details_random_generated = False
-        else:
-            # If nothing is uploaded and random was not chosen, ensure flag is false
-            st.session_state.product_details_random_generated = False
+        elif not st.session_state.product_details_random_generated and not st.session_state.product_details_data:
+            # If nothing uploaded and not randomly generated, ensure data is empty.
+            st.session_state.product_details_data = []
 
 
+# Use data from session state if available, otherwise assume it's just been set in this run
+product_full_details_data = st.session_state.product_details_data
 if not product_full_details_data:
     st.error("No Product Details loaded or generated. Please provide this data to proceed.")
     st.stop()
@@ -1163,18 +1176,20 @@ with st.sidebar.expander("Upload/Generate Property Data", expanded=st.session_st
     st.markdown("#### Property Data Source")
     data_source_option = st.radio("Select Property Data Source:", ("Generate Random Properties", "Upload CSV File"), key="property_data_source")
 
-    properties_data: List[Property] = []
-    
+    # Use a flag to check if we need to regenerate/reload property data
+    property_data_needs_update = False
     if data_source_option == "Generate Random Properties":
         num_properties = st.slider("Number of Random Properties", 50, 1000, 300, key="num_properties_gen")
-        properties_data = generate_random_properties(num_properties, available_product_codes_from_details)
-        if properties_data:
-            st.info(f"Generated {len(properties_data)} random properties.")
+        if not st.session_state.properties_random_generated or \
+           len(st.session_state.properties_data) != num_properties: # Regenerate if count changes
+            properties_data = generate_random_properties(num_properties, available_product_codes_from_details)
+            st.session_state.properties_data = properties_data
             st.session_state.properties_random_generated = True
-        else:
-            st.warning("No properties generated.")
-            st.session_state.properties_random_generated = False
-    else:
+            if properties_data:
+                st.info(f"Generated {len(properties_data)} random properties.")
+            else:
+                st.warning("No properties generated.")
+    else: # Upload CSV
         csv_sample_data = create_sample_properties_csv_content()
         st.download_button(
             label="Download Sample Property CSV",
@@ -1185,37 +1200,47 @@ with st.sidebar.expander("Upload/Generate Property Data", expanded=st.session_st
         )
         uploaded_file = st.file_uploader("Choose a CSV file for Properties", type="csv", key="upload_property_file", help="Expected columns: property_id,total_units,occupancy_rating,group,city,product_code.")
         if uploaded_file is not None:
-            string_data = io.StringIO(uploaded_file.getvalue().decode("utf-8"))
-            try:
-                properties_data = load_properties_from_csv(string_data)
-                if properties_data:
-                    st.success(f"Loaded **{len(properties_data)}** properties from CSV.")
+            # Check if the uploaded file has changed
+            if 'last_uploaded_properties_hash' not in st.session_state or \
+               st.session_state.last_uploaded_properties_hash != uploaded_file.file_id:
+                
+                string_data = io.StringIO(uploaded_file.getvalue().decode("utf-8"))
+                try:
+                    properties_data = load_properties_from_csv(string_data)
+                    if properties_data:
+                        st.success(f"Loaded **{len(properties_data)}** properties from CSV.")
+                        st.session_state.properties_data = properties_data
+                        st.session_state.properties_random_generated = False
+                        st.session_state.last_uploaded_properties_hash = uploaded_file.file_id
+                        
+                        # Validation: Check if property product codes exist in product_full_details_data
+                        missing_prop_codes = set()
+                        for p in properties_data:
+                            if p.product_code not in available_product_codes_from_details:
+                                missing_prop_codes.add(p.product_code)
+                        if missing_prop_codes:
+                            st.error(f"Error: Properties data contains unknown product codes: {', '.join(missing_prop_codes)}. Please ensure all product codes in properties data are defined in Product Details data.")
+                            st.session_state.properties_data = [] # Clear data if consistency issue
+                            st.session_state.properties_random_generated = False # If error, set back to false
+                    else: 
+                        st.error("CSV loaded, but no valid properties parsed. Check error messages above.")
+                        st.session_state.properties_data = []
+                        st.session_state.properties_random_generated = False
+                except Exception as e:
+                    st.error(f"Error processing Properties CSV: {e}. Please check file format and try again.")
+                    st.session_state.properties_data = []
                     st.session_state.properties_random_generated = False
-                    
-                    # Validation: Check if property product codes exist in product_full_details_data
-                    missing_prop_codes = set()
-                    for p in properties_data:
-                        if p.product_code not in available_product_codes_from_details:
-                            missing_prop_codes.add(p.product_code)
-                    if missing_prop_codes:
-                        st.error(f"Error: Properties data contains unknown product codes: {', '.join(missing_prop_codes)}. Please ensure all product codes in properties data are defined in Product Details data.")
-                        properties_data = [] # Clear data if consistency issue
-                        st.session_state.properties_random_generated = False # If error, set back to false
-                else: 
-                    st.error("CSV loaded, but no valid properties parsed. Check error messages above.")
-                    st.session_state.properties_random_generated = False
-            except Exception as e:
-                st.error(f"Error processing Properties CSV: {e}. Please check file format and try again.")
-                properties_data = []
-                st.session_state.properties_random_generated = False
-        else:
-            # If nothing is uploaded and random was not chosen, ensure flag is false
-            st.session_state.properties_random_generated = False
+        elif not st.session_state.properties_random_generated and not st.session_state.properties_data:
+            # If nothing uploaded and not randomly generated, ensure data is empty.
+            st.session_state.properties_data = []
 
+# Use data from session state for the rest of the application
+properties_data = st.session_state.properties_data
 
 if not properties_data:
     st.error("No properties loaded or generated. Please adjust data source settings to proceed.")
     st.stop()
+
 
 # --- Summary below the expander ---
 st.sidebar.markdown("---")
@@ -1288,7 +1313,15 @@ if lease_days <= 0:
 # Basic Controls
 with st.sidebar.expander("🎯 Basic Client Requirements", expanded=True):
     units_required = st.number_input("Target Units Required", value=100, min_value=1, step=1)
-    budget = st.number_input("Minimum Cost Target (₹)", value=100000.0, min_value=1.0, step=1000.0) 
+    
+    # Calculate sensible default budget
+    suggested_default_budget = round(avg_rent_per_unit_per_day * units_required * lease_days, 0)
+    if suggested_default_budget == 0 and units_required > 0 and lease_days > 0: # Ensure at least a minimal default if initial average is 0
+         suggested_default_budget = 1000.0 * units_required * lease_days # Fallback to a base rate of 1000 if avg is 0
+    elif suggested_default_budget == 0:
+        suggested_default_budget = 100000.0 # Absolute fallback if units or days are zero
+
+    budget = st.number_input("Minimum Cost Target (₹)", value=suggested_default_budget, min_value=1.0, step=1000.0) 
     budget_tolerance_percent = st.slider("Budget Upper Tolerance (%)", 0.0, 50.0, 10.0, help="Allows final cost to be up to this percentage above the Minimum Cost Target.")
     unit_tolerance_percent = st.slider("Units Tolerance (%)", 0.0, 50.0, 15.0, help="Allows final units to be within +/- this percentage of Target Units Required.")
 
