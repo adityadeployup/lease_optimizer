@@ -162,13 +162,16 @@ class LeaseOptimizerMILP:
                 prob += x[i] <= p.total_units * z[i], f"Units_max_limit_for_selected_prop_{i}"
                 prob += x[i] >= z[i], f"Units_min_limit_for_selected_prop_{i}"
 
+                # Link y to x and total_units
+                # If x[i] == p.total_units, then y[i] should be 1
                 prob += p.total_units - x[i] <= M * (1 - y[i]), f"Full_Prop_If_Units_Full_Part1_{i}"
-                prob += x[i] - p.total_units <= M * (1 - y[i]), f"Full_Prop_If_Units_Full_Part2_{i}"
-                
-                prob += x[i] >= p.total_units * y[i], f"Units_Full_If_Full_Prop_1_{i}"
-                prob += x[i] <= p.total_units * y[i] + (p.total_units -1) * (1-y[i]), f"Units_Full_If_Full_Prop_2_{i}"
+                prob += x[i] - p.total_units <= M * y[i], f"Full_Prop_If_Units_Full_Part2_{i}" # This ensures y[i] is 0 if x[i] < p.total_units, and doesn't force y[i] to 0 if x[i] = p.total_units
 
-                prob += y[i] <= z[i], f"Full_Prop_implies_Selected_{i}"
+                # Ensure y[i] is 1 if all units are taken, and 0 if not all units are taken.
+                prob += x[i] >= p.total_units * y[i], f"Units_Full_If_Full_Prop_1_{i}"
+                prob += x[i] <= p.total_units * y[i] + (p.total_units - 1) * (1 - y[i]), f"Units_Full_If_Full_Prop_2_{i}" # This line forces x[i] == p.total_units if y[i]==1
+
+                prob += y[i] <= z[i], f"Full_Prop_implies_Selected_{i}" # If y[i] is 1, z[i] must be 1
 
                 # Constraint: Default discount for this product code must be <= max allowed for that product code
                 # Max discount for this product code is now directly from ProductFullDetail
@@ -262,7 +265,7 @@ class LeaseOptimizerMILP:
                 else:
                     if sol_idx > 0:
                         st.warning(f"Warning: All properties are pre-selected. Only one unique selection pattern exists. Stopping solution search.")
-                        return solutions
+                    return solutions
                     
             # Solver parameters
             solver_params = {}
@@ -559,7 +562,15 @@ def post_process_discounts(
             
             if total_current_monetary_value_in_pc < 1e-6: continue
             
-            proportional_distribution_factor = amount_to_apply_to_this_pc / total_current_monetary_value_in_pc
+            # Distribute proportionally based on current monetary value, or evenly if values are zero
+            if total_current_monetary_value_in_pc > 1e-6:
+                proportional_distribution_factor = amount_to_apply_to_this_pc / total_current_monetary_value_in_pc
+            else: # If all properties in this product code have zero current monetary value, distribute evenly
+                if len(properties_in_pc) > 0:
+                    proportional_distribution_factor = amount_to_apply_to_this_pc / len(properties_in_pc)
+                else:
+                    proportional_distribution_factor = 0.0
+
 
             for p_adj_info in properties_in_pc:
                 potential_monetary_reduction_from_property = p_adj_info['lease_plan_obj'].units * p_adj_info['lease_plan_obj'].effective_rate_per_day * optimizer.days * proportional_distribution_factor
@@ -762,6 +773,7 @@ def calculate_plan_metrics(lease_plan: List[LeasePlan], all_properties_data: Lis
         selected_cities_units: Dict[str, int] = {}
         selected_product_codes_units: Dict[str, int] = {}
         total_properties_selected_in_plan = 0
+        properties_with_partial_lease_penalty: List[Dict[str, any]] = [] # NEW: To store info on penalized partial leases
 
         for lease in lease_plan:
             prop_obj_orig = next((p for p in all_properties_data if p.property_id == lease.property_id), None)
@@ -782,8 +794,18 @@ def calculate_plan_metrics(lease_plan: List[LeasePlan], all_properties_data: Lis
                 # Note: The 'selected_val' is not available here; we use 'lease.full_property' and 'lease.units < prop_obj_orig.total_units'
                 # to infer a partial lease. A more precise mapping to the solver's `(z[i] - y[i])` would be to verify
                 # `lease.full_property` (which is `y[i]` from solver) and assume `z[i]` is 1 if it's in the plan.
-                if not lease.full_property and lease.units < prop_obj_orig.total_units: # If selected but not full
-                    total_penalty_for_partial_leases += prop_obj_orig.total_units * optimizer.full_property_penalty_per_unit
+                
+                # IMPORTANT: The penalty is based on the *original total units* of the property if it's NOT a full lease.
+                # This is consistent with the solver's objective function.
+                if not lease.full_property: # If the solver set y[i] to 0 (meaning it's not a full lease)
+                    penalty_amount = prop_obj_orig.total_units * optimizer.full_property_penalty_per_unit
+                    total_penalty_for_partial_leases += penalty_amount
+                    properties_with_partial_lease_penalty.append({
+                        "property_id": lease.property_id,
+                        "units_leased": lease.units,
+                        "total_property_units": prop_obj_orig.total_units,
+                        "penalty_amount": penalty_amount
+                    })
 
 
                 if lease.occupancy_rating_at_selection > optimizer.occupancy_rating_threshold:
@@ -844,6 +866,7 @@ def calculate_plan_metrics(lease_plan: List[LeasePlan], all_properties_data: Lis
             "max_budget_allowed": max_budget_allowed,
             "min_units_allowed": min_units_allowed,
             "max_units_allowed": max_units_allowed,
+            "properties_with_partial_lease_penalty": properties_with_partial_lease_penalty # NEW RETURN VALUE
         }
     except Exception as e:
         st.error(f"Error calculating metrics for a plan: {e}. Returning default values.")
@@ -865,7 +888,8 @@ def calculate_plan_metrics(lease_plan: List[LeasePlan], all_properties_data: Lis
             "min_budget_allowed": 0.0,
             "max_budget_allowed": 0.0,
             "min_units_allowed": 0.0,
-            "max_units_allowed": 0.0
+            "max_units_allowed": 0.0,
+            "properties_with_partial_lease_penalty": [] # Default empty list
         }
 
 
@@ -966,6 +990,23 @@ def print_plan_details_st(
         st.error("❌ **Remaining Over Max Budget:** ₹{int(remaining_over_budget_amount):,} (Plan still exceeds max allowed budget after all possible discounts.)")
     else:
         st.success("✅ Within Max Budget")
+
+    # NEW SECTION: Properties with Partial Lease Penalty
+    properties_with_penalty = metrics.get('properties_with_partial_lease_penalty', [])
+    if properties_with_penalty:
+        st.markdown("#### Properties Incurring Partial Lease Penalty:")
+        penalty_display_data = []
+        for p_info in properties_with_penalty:
+            penalty_display_data.append({
+                "Property ID": p_info['property_id'],
+                "Units Leased": p_info['units_leased'],
+                "Total Property Units": p_info['total_property_units'],
+                "Partial Lease Penalty": f"₹{int(p_info['penalty_amount']):,}"
+            })
+        st.dataframe(penalty_display_data, use_container_width=True)
+        st.warning(f"Note: These properties are *not* leased for all their units (or are marked as 'PARTIAL LEASE' by the solver, i.e. Y=0), and their original `total_units` is greater than the 'Minimum Property Size for Partial Leasing' threshold ({optimizer.min_units_for_partial_leasing} units). Thus, they incur a penalty of ₹{optimizer.full_property_penalty_per_unit:.2f} per unit for their *total* units.")
+    else:
+        st.info("No properties are incurring a partial lease penalty in this plan.")
 
 
     st.markdown("#### Selected Properties by Group:")
@@ -1157,9 +1198,9 @@ with st.sidebar.expander("Upload/Generate Product Data", expanded=st.session_sta
                     st.error(f"Error processing Product Details CSV: {e}.")
                     st.session_state.product_details_data = []
                     st.session_state.product_details_random_generated = False
-        elif not st.session_state.product_details_random_generated and not st.session_state.product_details_data:
-            # If nothing uploaded and not randomly generated, ensure data is empty.
-            st.session_state.product_details_data = []
+            elif not st.session_state.product_details_random_generated and not st.session_state.product_details_data:
+                # If nothing uploaded and not randomly generated, ensure data is empty.
+                st.session_state.product_details_data = []
 
 
 # Use data from session state if available, otherwise assume it's just been set in this run
@@ -1230,9 +1271,9 @@ with st.sidebar.expander("Upload/Generate Property Data", expanded=st.session_st
                     st.error(f"Error processing Properties CSV: {e}. Please check file format and try again.")
                     st.session_state.properties_data = []
                     st.session_state.properties_random_generated = False
-        elif not st.session_state.properties_random_generated and not st.session_state.properties_data:
-            # If nothing uploaded and not randomly generated, ensure data is empty.
-            st.session_state.properties_data = []
+            elif not st.session_state.properties_random_generated and not st.session_state.properties_data:
+                # If nothing uploaded and not randomly generated, ensure data is empty.
+                st.session_state.properties_data = []
 
 # Use data from session state for the rest of the application
 properties_data = st.session_state.properties_data
@@ -1317,7 +1358,7 @@ with st.sidebar.expander("🎯 Basic Client Requirements", expanded=True):
     # Calculate sensible default budget
     suggested_default_budget = round(avg_rent_per_unit_per_day * units_required * lease_days, 0)
     if suggested_default_budget == 0 and units_required > 0 and lease_days > 0: # Ensure at least a minimal default if initial average is 0
-         suggested_default_budget = 1000.0 * units_required * lease_days # Fallback to a base rate of 1000 if avg is 0
+          suggested_default_budget = 1000.0 * units_required * lease_days # Fallback to a base rate of 1000 if avg is 0
     elif suggested_default_budget == 0:
         suggested_default_budget = 100000.0 # Absolute fallback if units or days are zero
 
